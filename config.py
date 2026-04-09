@@ -19,7 +19,7 @@ VERY_LARGE_FILE_THRESHOLD = 100000  # 줄 수 초과 시 진행률 표시
 # 지원 언어별 확장자
 LANGUAGE_EXTENSIONS = {
     "python": [".py"],
-    "c": [".c", ".h", ".cpp", ".hpp", ".cc", ".cxx", ".hh"],
+    "c": [".c", ".cpp", ".cc", ".cxx"],
     "java": [".java"],
     "javascript": [".js", ".ts", ".jsx", ".tsx"],
 }
