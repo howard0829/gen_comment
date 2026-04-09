@@ -136,16 +136,22 @@ class Processor:
         ext = file_path.suffix.lower()
         parser = get_parser(ext)
         if not parser:
+            if self.monitor:
+                self.monitor.skip_file(file_path.name, 0)
             return None
 
         # 파일 읽기 (인코딩 자동 감지)
         source, detected_encoding = self._read_file(file_path)
         if source is None:
+            if self.monitor:
+                self.monitor.skip_file(file_path.name, 0)
             return None
 
         # 함수 추출
         functions = parser.extract_functions(str(file_path), source)
         if not functions:
+            if self.monitor:
+                self.monitor.skip_file(file_path.name, 0)
             return None
 
         # 출력 경로 계산
@@ -182,9 +188,7 @@ class Processor:
             self.monitor.start_file(file_path.name, len(targets))
             # 필터링된 함수는 즉시 skip 처리
             if skipped_in_file > 0:
-                self.monitor.skip_count += skipped_in_file
-                self.monitor.global_func_total += skipped_in_file
-                self.monitor.global_func_done += skipped_in_file
+                self.monitor.add_skipped(skipped_in_file)
 
         # LLM 호출 + 주석 생성
         comment_results = self._generate_comments(targets, parser, file_path)

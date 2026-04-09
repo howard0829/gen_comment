@@ -70,6 +70,13 @@ class ProgressMonitor:
             self.global_func_done += func_count
         self._render()
 
+    def add_skipped(self, count: int):
+        """파일 내 필터링된 함수를 skip 카운터에 반영"""
+        with self._lock:
+            self.skip_count += count
+            self.global_func_total += count
+            self.global_func_done += count
+
     def finish(self):
         if not self.enabled:
             return
