@@ -37,6 +37,8 @@ Write at least 3 sentences and at most 10 sentences so that a reader can fully u
 - [Calls] lists other functions/methods this function calls.
 - Write in the same language as the source code comments (Korean if Korean, English if English, etc.).
   If no comments exist, default to Korean.
+- IMPORTANT: Write one sentence per line. Break lines at every sentence boundary (period, 마침표).
+  Do NOT write multiple sentences on the same line.
 - Do NOT wrap output in triple quotes, code fences, or any markup.
 - Do NOT include the function signature in your output.
 """
@@ -63,6 +65,7 @@ Output ONLY the comment content — no code fences, no triple quotes.
 
 - [Summary] is REQUIRED. Write 3-10 sentences describing the likely purpose and behavior based on the signature.
 - For other sections, be concise.
+- IMPORTANT: Write one sentence per line. Break lines at every sentence boundary.
 - Write in Korean by default.
 - Do NOT wrap output in any markup.
 """
