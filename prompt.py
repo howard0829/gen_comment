@@ -12,8 +12,10 @@ You are a code documentation expert. Generate a structured comment for the given
 
 Output ONLY the comment content below — no code fences, no triple quotes, no extra text.
 
-[Summary] Detailed description of what the function does, its purpose, key logic, and behavior.
-Write at least 3 sentences and at most 10 sentences so that a reader can fully understand the function without reading the code.
+[Summary]
+    Detailed first sentence about what the function does.
+    Second sentence about key logic or algorithm.
+    Third sentence about behavior or constraints.
 
 [Args]
     param1 (type): Description.
@@ -25,13 +27,20 @@ Write at least 3 sentences and at most 10 sentences so that a reader can fully u
 [Raises]
     ExceptionType: When it occurs.
 
-[Calls] function_a, module.function_b
-[Side Effects] Description of side effects.
-[Tags] keyword1, keyword2, keyword3
+[Calls]
+    function_a, module.function_b
+
+[Side Effects]
+    Description of side effects.
+
+[Tags]
+    keyword1, keyword2, keyword3
 
 ## Rules
 
 - [Summary] is REQUIRED. Write 3-10 sentences covering: what the function does, how it works (key logic/algorithm), and any important behavior or constraints.
+- Every section header (e.g. [Summary], [Args], [Calls], [Tags]) must be on its own line.
+  All content under each section must be indented with 4 spaces on the following lines.
 - For other sections, be concise. One line per parameter/return/exception.
 - [Tags] should include semantic keywords useful for search (synonyms, higher-level concepts).
 - [Calls] lists other functions/methods this function calls.
@@ -51,7 +60,10 @@ Since there is no function body, base your comment on the signature only.
 
 Output ONLY the comment content — no code fences, no triple quotes.
 
-[Summary] Detailed description based on function name and parameters (3-10 sentences).
+[Summary]
+    Detailed first sentence based on function name and parameters.
+    Second sentence about likely behavior.
+    Third sentence about constraints or usage.
 
 [Args]
     param1 (type): Description.
@@ -59,11 +71,13 @@ Output ONLY the comment content — no code fences, no triple quotes.
 [Returns]
     type: Description.
 
-[Tags] keyword1, keyword2
+[Tags]
+    keyword1, keyword2
 
 ## Rules
 
 - [Summary] is REQUIRED. Write 3-10 sentences describing the likely purpose and behavior based on the signature.
+- Every section header must be on its own line. All content must be indented with 4 spaces on the following lines.
 - For other sections, be concise.
 - IMPORTANT: Write one sentence per line. Break lines at every sentence boundary.
 - Write in Korean by default.
