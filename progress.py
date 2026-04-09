@@ -8,6 +8,8 @@ import threading
 class ProgressMonitor:
     """파일 및 함수 단위 실시간 진행률 표시"""
 
+    SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
     def __init__(self, total_files: int, enabled: bool = True):
         self.total_files = total_files
         self.enabled = enabled
@@ -35,6 +37,11 @@ class ProgressMonitor:
         self._last_line_len = 0
         self._lock = threading.Lock()
 
+        # 스피너 (LLM 대기 중 애니메이션)
+        self._spinner_active = False
+        self._spinner_thread: threading.Thread | None = None
+        self._spinner_idx = 0
+
     def start_file(self, file_name: str, func_total: int):
         with self._lock:
             self.current_file_idx += 1
@@ -43,14 +50,18 @@ class ProgressMonitor:
             self.current_func_done = 0
             self.current_func_name = ""
             self.global_func_total += func_total
-        self._render()
+        if self.enabled:
+            self._clear_line()
+            sys.stderr.write(f"  ▶ [{self.current_file_idx}/{self.total_files}] {file_name} ({func_total}개 함수)\n")
+            sys.stderr.flush()
 
     def start_function(self, func_name: str):
         with self._lock:
             self.current_func_name = func_name
-        self._render()
+        self._start_spinner()
 
     def finish_function(self, func_name: str, status: str = "success"):
+        self._stop_spinner()
         with self._lock:
             self.current_func_done += 1
             self.global_func_done += 1
@@ -80,6 +91,7 @@ class ProgressMonitor:
     def finish(self):
         if not self.enabled:
             return
+        self._stop_spinner()
         self._clear_line()
         elapsed = time.time() - self.start_time
         sys.stderr.write(
@@ -88,6 +100,30 @@ class ProgressMonitor:
             f"소요: {self._format_time(elapsed)}\n"
         )
         sys.stderr.flush()
+
+    def _start_spinner(self):
+        """LLM 대기 중 스피너 애니메이션 시작"""
+        if not self.enabled:
+            return
+        self._spinner_active = True
+        self._spinner_idx = 0
+        t = threading.Thread(target=self._spinner_loop, daemon=True)
+        self._spinner_thread = t
+        t.start()
+
+    def _stop_spinner(self):
+        """스피너 정지"""
+        self._spinner_active = False
+        if self._spinner_thread is not None:
+            self._spinner_thread.join(timeout=2)
+            self._spinner_thread = None
+
+    def _spinner_loop(self):
+        """0.5초 간격으로 스피너 갱신"""
+        while self._spinner_active:
+            self._render()
+            time.sleep(0.5)
+            self._spinner_idx += 1
 
     def _render(self):
         if not self.enabled:
@@ -102,6 +138,11 @@ class ProgressMonitor:
             remaining = (self.global_func_total - self.global_func_done) * rate
             eta_str = f" | ETA {self._format_time(remaining)}"
 
+        # 스피너 문자
+        spin = ""
+        if self._spinner_active:
+            spin = self.SPINNER[self._spinner_idx % len(self.SPINNER)] + " "
+
         # 현재 파일 내 진행
         file_progress = f"[{self.current_file_idx}/{self.total_files}]"
         func_progress = f"({self.current_func_done}/{self.current_func_total})"
@@ -115,7 +156,7 @@ class ProgressMonitor:
         counts = f"OK:{self.success_count} skip:{self.skip_count} err:{self.error_count}"
 
         line = (
-            f"\r{file_progress} {self.current_file_name} "
+            f"\r{spin}{file_progress} {self.current_file_name} "
             f"{func_progress} {func_display} | "
             f"{counts} | {self._format_time(elapsed)}{eta_str}"
         )
