@@ -196,6 +196,10 @@ class Processor:
         result.functions_commented = len(comment_results)
         result.functions_skipped = len(functions) - len(comment_results)
 
+        # 파일 처리 완료 → 파일 바 진행
+        if self.monitor:
+            self.monitor.finish_file()
+
         if not comment_results:
             return result
 
