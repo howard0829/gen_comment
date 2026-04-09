@@ -120,8 +120,8 @@ class CParser(BaseParser):
             # 본문 들여쓰기
             body_indent = self._detect_indent(lines, body_start_line)
 
-            # 기존 주석 확인
-            has_comment = self._has_existing_comment(lines, body_start_line)
+            # 기존 주석 확인 (함수 앞에 /** ... */ 스타일 doc-comment가 있는지)
+            has_comment = self._has_existing_doc_comment(lines, sig_line)
 
             # col_offset
             col_offset = 0
@@ -373,10 +373,15 @@ class CParser(BaseParser):
                 return line[: len(line) - len(stripped)]
         return "    "
 
-    def _has_existing_comment(self, lines, body_start_lineno) -> bool:
-        if 1 <= body_start_lineno <= len(lines):
-            line = lines[body_start_lineno - 1].strip()
-            return line.startswith("/*") or line.startswith("//")
+    def _has_existing_doc_comment(self, lines, func_lineno) -> bool:
+        """함수 시그니처 바로 위에 doc-comment(/** ... */)가 있는지 확인."""
+        check_line = func_lineno - 2  # func_lineno는 1-based, 바로 윗줄은 -2 (0-based)
+        if check_line < 0:
+            return False
+        line = lines[check_line].strip()
+        # */ 로 끝나는 블록 주석 (Doxygen /** ... */ 스타일)
+        if line.endswith("*/"):
+            return True
         return False
 
     def format_comment(self, raw_comment: str, indent: str) -> list[str]:

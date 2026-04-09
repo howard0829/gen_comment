@@ -285,21 +285,21 @@ class Processor:
             self.monitor.finish_function(func.name, "error")
             return False
 
-        comment_lines = parser.format_comment(parsed, func.body_indent)
-
-        # 삽입 위치 결정
-        if func.is_declaration_only:
+        # 삽입 위치 결정 + 주석 포맷
+        if func.language == "c":
+            # C: 함수 시그니처 앞에 블록 주석 삽입 (Doxygen 관례)
+            indent = " " * func.col_offset
+            comment_lines = parser.format_comment(parsed, indent)
+            insert_lineno = func.lineno
+        elif func.is_declaration_only:
+            comment_lines = parser.format_comment(parsed, func.body_indent)
             insert_lineno = func.lineno
         elif func.body_start_lineno:
+            comment_lines = parser.format_comment(parsed, func.body_indent)
             insert_lineno = func.body_start_lineno
         else:
             self.monitor.finish_function(func.name, "error")
             return False
-
-        # 기존 주석 교체 범위
-        replace_end = None
-        if func.has_existing_docstring and self.overwrite and func.body_start_lineno:
-            replace_end = self._find_docstring_end(result_path, func)
 
         # result 파일을 읽어서 해당 위치에 주석 삽입 후 저장
         source, _ = self._read_file(result_path)
@@ -313,9 +313,18 @@ class Processor:
 
         idx = insert_lineno - 1  # 0-based
 
-        # 기존 주석 교체
-        if replace_end is not None:
-            del lines[idx:replace_end]
+        # 기존 주석 교체 (--overwrite 시)
+        if func.has_existing_docstring and self.overwrite:
+            if func.language == "c":
+                # C: 함수 위 doc-comment 제거 (/** ... */ 블록)
+                del_start = self._find_doc_comment_range(lines, idx)
+                if del_start is not None:
+                    del lines[del_start:idx]
+                    idx = del_start
+            elif func.language == "python" and func.body_start_lineno:
+                end = self._find_docstring_end_lineno(lines, func.body_start_lineno)
+                if end is not None:
+                    del lines[idx:end]
 
         # 주석 삽입
         for i, line in enumerate(comment_lines):
@@ -339,33 +348,46 @@ class Processor:
             targets.append(func)
         return targets
 
-    def _find_docstring_end(self, file_path: Path, func: FunctionInfo) -> int | None:
-        """기존 docstring의 끝 라인을 찾는다 (Python 전용)."""
-        if func.language != "python" or not func.body_start_lineno:
-            return None
-
-        try:
-            source = file_path.read_text(encoding="utf-8")
-        except Exception:
-            return None
-
-        lines = source.splitlines()
-        start_idx = func.body_start_lineno - 1
-
+    def _find_docstring_end_lineno(self, lines: list[str], body_start_lineno: int) -> int | None:
+        """Python docstring의 끝 라인 인덱스를 반환 (0-based exclusive)."""
+        start_idx = body_start_lineno - 1
         if start_idx >= len(lines):
             return None
 
         first_line = lines[start_idx].strip()
-
         for quote in ('"""', "'''"):
             if quote in first_line:
                 rest = first_line.split(quote, 1)[1]
                 if quote in rest:
-                    return func.body_start_lineno
+                    return start_idx + 1
                 for i in range(start_idx + 1, min(start_idx + 200, len(lines))):
                     if quote in lines[i]:
                         return i + 1
                 break
+        return None
+
+    def _find_doc_comment_range(self, lines: list[str], func_idx: int) -> int | None:
+        """함수 시그니처(func_idx, 0-based) 위의 doc-comment 시작 인덱스를 반환.
+
+        /** ... */ 또는 /* ... */ 블록 주석을 역추적.
+        """
+        check = func_idx - 1
+        # 빈 줄 건너뛰기
+        while check >= 0 and not lines[check].strip():
+            check -= 1
+        if check < 0:
+            return None
+
+        # */ 로 끝나는지 확인
+        if not lines[check].strip().endswith("*/"):
+            return None
+
+        # /* 시작점 역추적
+        end_idx = check + 1
+        while check >= 0:
+            if "/*" in lines[check]:
+                return check  # doc-comment 시작 (0-based)
+            check -= 1
 
         return None
 
