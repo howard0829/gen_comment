@@ -44,8 +44,7 @@ Output ONLY the comment content below — no code fences, no triple quotes, no e
 - For other sections, be concise. One line per parameter/return/exception.
 - [Tags] should include semantic keywords useful for search (synonyms, higher-level concepts).
 - [Calls] lists other functions/methods this function calls.
-- Write in the same language as the source code comments (Korean if Korean, English if English, etc.).
-  If no comments exist, default to Korean.
+- Always write in English.
 - IMPORTANT: Write one sentence per line. Break lines at every sentence boundary (period, 마침표).
   Do NOT write multiple sentences on the same line.
 - Do NOT wrap output in triple quotes, code fences, or any markup.
@@ -80,7 +79,7 @@ Output ONLY the comment content — no code fences, no triple quotes.
 - Every section header must be on its own line. All content must be indented with 4 spaces on the following lines.
 - For other sections, be concise.
 - IMPORTANT: Write one sentence per line. Break lines at every sentence boundary.
-- Write in Korean by default.
+- Always write in English.
 - Do NOT wrap output in any markup.
 """
 
