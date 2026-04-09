@@ -12,7 +12,8 @@ You are a code documentation expert. Generate a structured comment for the given
 
 Output ONLY the comment content below — no code fences, no triple quotes, no extra text.
 
-[Summary] One-line description of what the function does.
+[Summary] Detailed description of what the function does, its purpose, key logic, and behavior.
+Write at least 3 sentences and at most 10 sentences so that a reader can fully understand the function without reading the code.
 
 [Args]
     param1 (type): Description.
@@ -30,8 +31,8 @@ Output ONLY the comment content below — no code fences, no triple quotes, no e
 
 ## Rules
 
-- [Summary] is REQUIRED. All other sections are optional — omit if not applicable.
-- Be concise. One line per parameter/return/exception.
+- [Summary] is REQUIRED. Write 3-10 sentences covering: what the function does, how it works (key logic/algorithm), and any important behavior or constraints.
+- For other sections, be concise. One line per parameter/return/exception.
 - [Tags] should include semantic keywords useful for search (synonyms, higher-level concepts).
 - [Calls] lists other functions/methods this function calls.
 - Write in the same language as the source code comments (Korean if Korean, English if English, etc.).
@@ -48,7 +49,7 @@ Since there is no function body, base your comment on the signature only.
 
 Output ONLY the comment content — no code fences, no triple quotes.
 
-[Summary] One-line description based on function name and parameters.
+[Summary] Detailed description based on function name and parameters (3-10 sentences).
 
 [Args]
     param1 (type): Description.
@@ -60,8 +61,8 @@ Output ONLY the comment content — no code fences, no triple quotes.
 
 ## Rules
 
-- [Summary] is REQUIRED.
-- Be concise — this is a declaration without implementation.
+- [Summary] is REQUIRED. Write 3-10 sentences describing the likely purpose and behavior based on the signature.
+- For other sections, be concise.
 - Write in Korean by default.
 - Do NOT wrap output in any markup.
 """
