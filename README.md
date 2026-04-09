@@ -6,10 +6,11 @@
 
 - **다국어 지원**: Python, C/C++, Java, JavaScript/TypeScript
 - **함수 단위 처리**: 파일 전체가 아닌 개별 함수만 LLM에 전달하여 속도와 정확도 향상
-- **원본 보존**: 원본 파일은 수정하지 않고 `result/` 폴더에 결과 출력
+- **원본 보존**: 원본 파일은 수정하지 않고 `result/` 폴더에 전체 복사 후 작업
+- **즉시 반영**: 함수마다 주석 생성 즉시 result 파일에 저장 (중단 시에도 이전 결과 보존)
 - **RAG 최적화 주석**: `[Summary]`, `[Args]`, `[Tags]` 등 구조화된 포맷으로 검색 성능 극대화
-- **대형 파일 대응**: 10만줄+ 파일도 청크 기반 스트리밍으로 처리
-- **선언/프로토타입 감지**: 본문 없는 함수(헤더, 인터페이스, 추상 메서드)를 자동 식별
+- **실시간 진행률**: tqdm 기반 파일/함수 단위 프로그레스 바
+- **비UTF-8 파일 지원**: chardet 기반 인코딩 자동 감지 (EUC-KR, Shift_JIS 등)
 
 ## 설치
 
@@ -25,15 +26,16 @@ ollama serve
 
 ```
 requests>=2.28.0
-tree-sitter>=0.24.0        # C/C++, Java, JS 파싱용 (Python만 사용 시 불필요)
-tree-sitter-c>=0.23.0
-tree-sitter-cpp>=0.23.0
+chardet>=5.0.0
+tqdm>=4.60.0
+tree-sitter>=0.24.0        # Java, JS/TS 파싱용 (Python, C만 사용 시 불필요)
 tree-sitter-java>=0.23.0
 tree-sitter-javascript>=0.23.0
 tree-sitter-typescript>=0.23.0
 ```
 
-> Python 파일만 처리할 경우 `requests`만 설치하면 됩니다. tree-sitter 패키지 없이도 Python 파싱은 정상 동작합니다.
+> Python, C/C++ 파일만 처리할 경우 `requests`, `chardet`, `tqdm`만 설치하면 됩니다.
+> C/C++ 파서는 외부 의존성 없이 정규식 + 중괄호 매칭으로 동작합니다.
 
 ## 사용법
 
@@ -63,7 +65,7 @@ python3 main.py ./src --dry-run
 |------|------|--------|
 | `path` | 처리할 디렉토리 또는 파일 경로 | (필수) |
 | `-o`, `--output` | 출력 디렉토리 | `result/` |
-| `-m`, `--model` | Ollama 모델명 | `qwen3:8b` |
+| `-m`, `--model` | Ollama 모델명 | `gemma4:31b` |
 | `--ollama-url` | Ollama API URL | `http://localhost:11434` |
 | `--workers` | 파일 내 병렬 LLM 호출 수 | `3` |
 | `--overwrite` | 기존 docstring/주석도 재생성 | off |
@@ -81,23 +83,30 @@ python3 main.py ./src --lang python,java
 # 기존 docstring 덮어쓰기
 python3 main.py ./src --overwrite
 
-# C/C++ 헤더파일의 프로토타입에도 주석 생성
-python3 main.py ./include --include-declarations
-
 # 다른 Ollama 모델 사용
-python3 main.py ./src -m llama3:8b
+python3 main.py ./src -m qwen3:8b
 
 # 병렬 처리 수 조절 (GPU 성능에 따라)
 python3 main.py ./src --workers 1
 ```
 
+## 처리 동작 방식
+
+```
+1. 모든 파일을 result/ 폴더에 복사
+2. result/ 내 소스 파일에서 함수를 추출하고 처리 대상을 필터링
+3. 각 함수의 소스 텍스트를 LLM에 전달하여 주석 생성
+4. 주석이 생성되면 해당 함수의 중괄호({ ) 다음 줄에 즉시 삽입 후 파일 저장
+5. bottom-up (파일 뒤쪽 함수부터) 순서로 처리하여 라인 번호 시프트 방지
+```
+
 ## 출력 구조
 
-원본 디렉토리 구조를 `result/` 폴더에 그대로 미러링합니다.
+원본 디렉토리 구조를 `result/` 폴더에 그대로 복사하여 작업합니다.
 
 ```
 원본: ./src/auth/login.py
-결과: ./result/src/auth/login.py
+결과: ./result/auth/login.py
 ```
 
 처리 완료 시 요약 리포트가 출력됩니다:
@@ -190,23 +199,12 @@ public AuthResult authenticateUser(String username, String password) {
 
 해당 없는 섹션은 자동으로 생략됩니다.
 
-## 처리 동작 방식
-
-```
-1. 지정된 경로를 재귀 탐색하여 지원 언어의 소스 파일을 수집
-2. 각 파일을 파서(ast / tree-sitter)로 분석하여 함수 목록 추출
-3. 함수별로 소스 텍스트만 추출하여 LLM에 개별 전달
-4. LLM 응답을 파싱하여 언어에 맞는 주석 포맷으로 변환
-5. 파일 뒤쪽 함수부터 역순(bottom-up)으로 주석 삽입 (라인 번호 시프트 방지)
-6. result/ 폴더에 동일한 디렉토리 구조로 결과 저장
-```
-
 ### 자동 스킵 대상
 
 - 이미 docstring/주석이 있는 함수 (`--overwrite`로 재생성 가능)
-- 본문 없는 함수 선언: C/C++ 프로토타입, 추상 메서드, 인터페이스 (`--include-declarations`로 포함 가능)
+- 본문 없는 함수 선언: 추상 메서드, 인터페이스 (`--include-declarations`로 포함 가능)
+- 헤더 파일 (`.h`, `.hpp`, `.hh`)
 - 구문 오류가 있는 파일
-- UTF-8이 아닌 파일
 
 ## 프로젝트 구조
 
@@ -217,13 +215,14 @@ gen_comment/
 ├── models.py                # 데이터 클래스
 ├── llm_client.py            # Ollama API 클라이언트
 ├── prompt.py                # 프롬프트 템플릿 및 응답 파싱
-├── comment_inserter.py      # 주석 삽입 엔진
 ├── processor.py             # 파일 처리 오케스트레이터
+├── progress.py              # tqdm 기반 진행률 모니터
+├── comment_inserter.py      # 주석 삽입 엔진 (레거시)
 ├── parsers/
 │   ├── __init__.py          # 파서 레지스트리
 │   ├── base.py              # 파서 추상 클래스
-│   ├── python_parser.py     # Python (ast)
-│   ├── c_parser.py          # C/C++ (tree-sitter)
+│   ├── python_parser.py     # Python (ast 표준 라이브러리)
+│   ├── c_parser.py          # C/C++ (정규식 + 중괄호 매칭)
 │   ├── java_parser.py       # Java (tree-sitter)
 │   └── js_parser.py         # JavaScript/TypeScript (tree-sitter)
 ├── requirements.txt
@@ -237,6 +236,8 @@ gen_comment/
 | 언어 | 확장자 | 파싱 엔진 |
 |------|--------|-----------|
 | Python | `.py` | `ast` (표준 라이브러리) |
-| C/C++ | `.c` `.h` `.cpp` `.hpp` `.cc` `.cxx` `.hh` | tree-sitter |
+| C/C++ | `.c` `.cpp` `.cc` `.cxx` | 정규식 + 중괄호 매칭 (외부 의존성 없음) |
 | Java | `.java` | tree-sitter |
 | JavaScript/TypeScript | `.js` `.ts` `.jsx` `.tsx` | tree-sitter |
+
+> C/C++ 헤더 파일(`.h`, `.hpp`, `.hh`)은 자동 스킵됩니다.
