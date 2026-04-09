@@ -66,20 +66,85 @@ class Processor:
 
         logger.info("발견된 파일: %d개", len(files))
 
-        # 진행률 모니터 초기화 (dry-run이 아닐 때만)
-        self.monitor = ProgressMonitor(
-            total_files=len(files),
-            enabled=not self.dry_run,
-        )
+        # ── 1단계: 전체 파일 스캔 (함수 추출 + 필터링) ──
+        scan_results = []  # (file_path, parser, source, encoding, functions, targets, dest_path)
+        total_targets = 0
+        total_skipped = 0
 
         for file_path in files:
-            result = self._process_file(file_path)
-            if result:
-                results.append(result)
+            ext = file_path.suffix.lower()
+            parser = get_parser(ext)
+            if not parser:
+                continue
 
-        if self.monitor:
-            self.monitor.finish()
+            source, detected_encoding = self._read_file(file_path)
+            if source is None:
+                continue
 
+            functions = parser.extract_functions(str(file_path), source)
+            if not functions:
+                continue
+
+            targets = self._filter_targets(functions)
+
+            # 출력 경로 계산
+            if self.root_path.is_file():
+                rel_path = file_path.name
+            else:
+                rel_path = file_path.relative_to(self.root_path)
+            dest_path = self.output_dir / rel_path
+
+            if self.dry_run:
+                self._print_dry_run(file_path, functions, targets)
+                results.append(FileResult(
+                    source_path=str(file_path),
+                    dest_path=str(dest_path),
+                    functions_found=len(functions),
+                    functions_skipped=len(functions) - len(targets),
+                ))
+                continue
+
+            skipped_in_file = len(functions) - len(targets)
+            total_skipped += skipped_in_file
+            total_targets += len(targets)
+
+            if targets:
+                scan_results.append((
+                    file_path, parser, source, detected_encoding,
+                    functions, targets, dest_path,
+                ))
+            else:
+                results.append(FileResult(
+                    source_path=str(file_path),
+                    dest_path=str(dest_path),
+                    functions_found=len(functions),
+                    functions_skipped=len(functions),
+                ))
+
+        if self.dry_run:
+            return results
+
+        if not scan_results:
+            logger.info("처리할 함수가 없습니다.")
+            return results
+
+        logger.info("처리 대상: %d개 파일, %d개 함수 (스킵: %d개)", len(scan_results), total_targets, total_skipped)
+
+        # ── 2단계: 진행률 모니터 초기화 후 LLM 처리 ──
+        self.monitor = ProgressMonitor(
+            total_files=len(scan_results),
+            total_functions=total_targets,
+            enabled=True,
+        )
+        self.monitor.add_skipped(total_skipped)
+
+        for file_path, parser, source, encoding, functions, targets, dest_path in scan_results:
+            result = self._process_scanned_file(
+                file_path, parser, source, functions, targets, dest_path,
+            )
+            results.append(result)
+
+        self.monitor.finish()
         return results
 
     def _discover_files(self):
@@ -132,63 +197,23 @@ class Processor:
         logger.warning("인코딩 감지 실패, 스킵: %s", file_path)
         return None, ""
 
-    def _process_file(self, file_path: Path) -> FileResult | None:
-        ext = file_path.suffix.lower()
-        parser = get_parser(ext)
-        if not parser:
-            if self.monitor:
-                self.monitor.skip_file(file_path.name, 0)
-            return None
-
-        # 파일 읽기 (인코딩 자동 감지)
-        source, detected_encoding = self._read_file(file_path)
-        if source is None:
-            if self.monitor:
-                self.monitor.skip_file(file_path.name, 0)
-            return None
-
-        # 함수 추출
-        functions = parser.extract_functions(str(file_path), source)
-        if not functions:
-            if self.monitor:
-                self.monitor.skip_file(file_path.name, 0)
-            return None
-
-        # 출력 경로 계산
-        if self.root_path.is_file():
-            rel_path = file_path.name
-        else:
-            rel_path = file_path.relative_to(self.root_path)
-        dest_path = self.output_dir / rel_path
-
+    def _process_scanned_file(
+        self,
+        file_path: Path,
+        parser,
+        source: str,
+        functions: list[FunctionInfo],
+        targets: list[FunctionInfo],
+        dest_path: Path,
+    ) -> FileResult:
         result = FileResult(
             source_path=str(file_path),
             dest_path=str(dest_path),
             functions_found=len(functions),
         )
 
-        # 처리 대상 필터링
-        targets = self._filter_targets(functions)
-
-        if not targets:
-            result.functions_skipped = len(functions)
-            if self.dry_run:
-                self._print_dry_run(file_path, functions, targets)
-            elif self.monitor:
-                self.monitor.skip_file(file_path.name, len(functions))
-            return result
-
-        if self.dry_run:
-            self._print_dry_run(file_path, functions, targets)
-            return result
-
         # 모니터에 파일 시작 알림
-        skipped_in_file = len(functions) - len(targets)
-        if self.monitor:
-            self.monitor.start_file(file_path.name, len(targets))
-            # 필터링된 함수는 즉시 skip 처리
-            if skipped_in_file > 0:
-                self.monitor.add_skipped(skipped_in_file)
+        self.monitor.start_file(file_path.name, len(targets))
 
         # LLM 호출 + 주석 생성
         comment_results = self._generate_comments(targets, parser, file_path)
@@ -197,8 +222,7 @@ class Processor:
         result.functions_skipped = len(functions) - len(comment_results)
 
         # 파일 처리 완료 → 파일 바 진행
-        if self.monitor:
-            self.monitor.finish_file()
+        self.monitor.finish_file()
 
         if not comment_results:
             return result
