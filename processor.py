@@ -1,15 +1,14 @@
 """오케스트레이터 — 디렉토리 순회, 파싱, LLM 호출, 주석 삽입 통합"""
 
 import logging
-import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from comment_inserter import insert_comments
-from config import VERY_LARGE_FILE_THRESHOLD
 from llm_client import OllamaClient
 from models import CommentResult, FileResult, FunctionInfo
 from parsers import get_parser, supported_extensions
+from progress import ProgressMonitor
 from prompt import build_user_prompt, get_system_prompt, parse_llm_response
 
 logger = logging.getLogger(__name__)
@@ -46,6 +45,8 @@ class Processor:
         else:
             self.allowed_extensions = set(supported_extensions())
 
+        self.monitor: ProgressMonitor | None = None
+
     def run(self) -> list[FileResult]:
         results = []
 
@@ -60,10 +61,19 @@ class Processor:
 
         logger.info("발견된 파일: %d개", len(files))
 
+        # 진행률 모니터 초기화 (dry-run이 아닐 때만)
+        self.monitor = ProgressMonitor(
+            total_files=len(files),
+            enabled=not self.dry_run,
+        )
+
         for file_path in files:
             result = self._process_file(file_path)
             if result:
                 results.append(result)
+
+        if self.monitor:
+            self.monitor.finish()
 
         return results
 
@@ -110,15 +120,26 @@ class Processor:
             result.functions_skipped = len(functions)
             if self.dry_run:
                 self._print_dry_run(file_path, functions, targets)
+            elif self.monitor:
+                self.monitor.skip_file(file_path.name, len(functions))
             return result
 
         if self.dry_run:
             self._print_dry_run(file_path, functions, targets)
             return result
 
+        # 모니터에 파일 시작 알림
+        skipped_in_file = len(functions) - len(targets)
+        if self.monitor:
+            self.monitor.start_file(file_path.name, len(targets))
+            # 필터링된 함수는 즉시 skip 처리
+            if skipped_in_file > 0:
+                self.monitor.skip_count += skipped_in_file
+                self.monitor.global_func_total += skipped_in_file
+                self.monitor.global_func_done += skipped_in_file
+
         # LLM 호출 + 주석 생성
-        show_progress = len(source.splitlines()) > VERY_LARGE_FILE_THRESHOLD
-        comment_results = self._generate_comments(targets, parser, file_path, show_progress)
+        comment_results = self._generate_comments(targets, parser, file_path)
 
         result.functions_commented = len(comment_results)
         result.functions_skipped = len(functions) - len(comment_results)
@@ -128,7 +149,6 @@ class Processor:
 
         # 주석 삽입
         original_lines = source.splitlines(keepends=True)
-        # 마지막 줄에 개행이 없으면 추가
         if original_lines and not original_lines[-1].endswith("\n"):
             original_lines[-1] += "\n"
 
@@ -137,17 +157,15 @@ class Processor:
         # 결과 파일 저장
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         dest_path.write_text("".join(new_lines), encoding="utf-8")
-        logger.info("저장: %s (%d개 함수)", dest_path, len(comment_results))
+        logger.debug("저장: %s (%d개 함수)", dest_path, len(comment_results))
 
         return result
 
     def _filter_targets(self, functions: list[FunctionInfo]) -> list[FunctionInfo]:
         targets = []
         for func in functions:
-            # 선언 전용 → --include-declarations 필요
             if func.is_declaration_only and not self.include_declarations:
                 continue
-            # 기존 주석 → --overwrite 필요
             if func.has_existing_docstring and not self.overwrite:
                 continue
             targets.append(func)
@@ -158,35 +176,45 @@ class Processor:
         targets: list[FunctionInfo],
         parser,
         file_path: Path,
-        show_progress: bool,
     ) -> list[CommentResult]:
         comment_results = []
-        total = len(targets)
 
         def process_one(func: FunctionInfo) -> CommentResult | None:
+            if self.monitor:
+                self.monitor.start_function(func.name)
+
             sys_prompt = get_system_prompt(func)
             user_prompt = build_user_prompt(func)
             raw = self.llm.generate_comment(sys_prompt, user_prompt)
+
             if not raw:
+                if self.monitor:
+                    self.monitor.finish_function(func.name, "error")
                 return None
+
             parsed = parse_llm_response(raw)
             if not parsed:
+                if self.monitor:
+                    self.monitor.finish_function(func.name, "error")
                 return None
 
             comment_lines = parser.format_comment(parsed, func.body_indent)
 
-            # 삽입 위치 결정
             if func.is_declaration_only:
-                insert_lineno = func.lineno  # 함수 선언 앞
+                insert_lineno = func.lineno
             elif func.body_start_lineno:
                 insert_lineno = func.body_start_lineno
             else:
+                if self.monitor:
+                    self.monitor.finish_function(func.name, "error")
                 return None
 
-            # 기존 docstring 교체 범위
             replace_end = None
             if func.has_existing_docstring and self.overwrite and func.body_start_lineno:
                 replace_end = self._find_docstring_end(file_path, func)
+
+            if self.monitor:
+                self.monitor.finish_function(func.name, "success")
 
             return CommentResult(
                 function_name=func.name,
@@ -195,21 +223,15 @@ class Processor:
                 replace_end_lineno=replace_end,
             )
 
-        if self.workers <= 1 or total <= 1:
-            for i, func in enumerate(targets):
-                if show_progress:
-                    self._show_progress(file_path.name, i + 1, total)
+        if self.workers <= 1 or len(targets) <= 1:
+            for func in targets:
                 result = process_one(func)
                 if result:
                     comment_results.append(result)
         else:
             with ThreadPoolExecutor(max_workers=self.workers) as executor:
                 futures = {executor.submit(process_one, func): func for func in targets}
-                done_count = 0
                 for future in as_completed(futures):
-                    done_count += 1
-                    if show_progress:
-                        self._show_progress(file_path.name, done_count, total)
                     try:
                         result = future.result()
                         if result:
@@ -217,6 +239,8 @@ class Processor:
                     except Exception as e:
                         func = futures[future]
                         logger.error("함수 '%s' 처리 실패: %s", func.name, e)
+                        if self.monitor:
+                            self.monitor.finish_function(func.name, "error")
 
         return comment_results
 
@@ -238,28 +262,17 @@ class Processor:
 
         first_line = lines[start_idx].strip()
 
-        # triple-quote 시작 확인
         for quote in ('"""', "'''"):
             if quote in first_line:
-                # 같은 줄에서 닫히는 경우
                 rest = first_line.split(quote, 1)[1]
                 if quote in rest:
                     return func.body_start_lineno
-
-                # 여러 줄 docstring
                 for i in range(start_idx + 1, min(start_idx + 200, len(lines))):
                     if quote in lines[i]:
-                        return i + 1  # 1-based
+                        return i + 1
                 break
 
         return None
-
-    def _show_progress(self, filename: str, current: int, total: int):
-        pct = int(current / total * 100)
-        sys.stderr.write(f"\r  [{filename}] {current}/{total} 함수 ({pct}%)")
-        if current == total:
-            sys.stderr.write("\n")
-        sys.stderr.flush()
 
     def _print_dry_run(self, file_path: Path, functions: list[FunctionInfo], targets: list[FunctionInfo]):
         print(f"\n📄 {file_path}")
