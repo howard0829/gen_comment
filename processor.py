@@ -4,6 +4,11 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+try:
+    import chardet
+except ImportError:
+    chardet = None
+
 from comment_inserter import insert_comments
 from llm_client import OllamaClient
 from models import CommentResult, FileResult, FunctionInfo
@@ -82,17 +87,60 @@ class Processor:
             pattern = f"*{ext}"
             yield from self.root_path.rglob(pattern)
 
+    def _read_file(self, file_path: Path) -> tuple[str | None, str]:
+        """파일을 읽어 (소스 텍스트, 감지된 인코딩)을 반환한다.
+
+        UTF-8 → chardet 감지 → 일반적 인코딩 순으로 시도.
+        모두 실패하면 (None, "") 반환.
+        """
+        # 1차: UTF-8 시도
+        try:
+            source = file_path.read_text(encoding="utf-8")
+            return source, "utf-8"
+        except UnicodeDecodeError:
+            pass
+
+        # 바이너리 읽기
+        try:
+            raw = file_path.read_bytes()
+        except Exception as e:
+            logger.warning("파일 읽기 실패: %s (%s)", file_path, e)
+            return None, ""
+
+        # 2차: chardet 인코딩 감지
+        if chardet is not None:
+            detected = chardet.detect(raw)
+            enc = detected.get("encoding")
+            conf = detected.get("confidence", 0)
+            if enc and conf > 0.5:
+                try:
+                    source = raw.decode(enc)
+                    logger.info("인코딩 감지: %s → %s (신뢰도: %.0f%%)", file_path.name, enc, conf * 100)
+                    return source, enc
+                except (UnicodeDecodeError, LookupError):
+                    pass
+
+        # 3차: 일반적 인코딩 폴백
+        for enc in ("euc-kr", "cp949", "latin-1", "shift_jis", "gb2312"):
+            try:
+                source = raw.decode(enc)
+                logger.info("폴백 인코딩: %s → %s", file_path.name, enc)
+                return source, enc
+            except (UnicodeDecodeError, LookupError):
+                continue
+
+        logger.warning("인코딩 감지 실패, 스킵: %s", file_path)
+        return None, ""
+
     def _process_file(self, file_path: Path) -> FileResult | None:
         ext = file_path.suffix.lower()
         parser = get_parser(ext)
         if not parser:
             return None
 
-        # 파일 읽기
-        try:
-            source = file_path.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            logger.warning("비UTF-8 파일 스킵: %s", file_path)
+        # 파일 읽기 (인코딩 자동 감지)
+        source, detected_encoding = self._read_file(file_path)
+        if source is None:
             return None
 
         # 함수 추출
