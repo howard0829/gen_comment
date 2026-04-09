@@ -1,0 +1,273 @@
+"""오케스트레이터 — 디렉토리 순회, 파싱, LLM 호출, 주석 삽입 통합"""
+
+import logging
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+from comment_inserter import insert_comments
+from config import VERY_LARGE_FILE_THRESHOLD
+from llm_client import OllamaClient
+from models import CommentResult, FileResult, FunctionInfo
+from parsers import get_parser, supported_extensions
+from prompt import build_user_prompt, get_system_prompt, parse_llm_response
+
+logger = logging.getLogger(__name__)
+
+
+class Processor:
+    def __init__(
+        self,
+        root_path: str,
+        output_dir: str,
+        llm: OllamaClient,
+        workers: int = 3,
+        overwrite: bool = False,
+        include_declarations: bool = False,
+        allowed_languages: set[str] | None = None,
+        dry_run: bool = False,
+    ):
+        self.root_path = Path(root_path).resolve()
+        self.output_dir = Path(output_dir).resolve()
+        self.llm = llm
+        self.workers = workers
+        self.overwrite = overwrite
+        self.include_declarations = include_declarations
+        self.allowed_languages = allowed_languages
+        self.dry_run = dry_run
+
+        # 허용 확장자 필터
+        self.allowed_extensions = set()
+        if allowed_languages:
+            from config import LANGUAGE_EXTENSIONS
+            for lang in allowed_languages:
+                for ext in LANGUAGE_EXTENSIONS.get(lang, []):
+                    self.allowed_extensions.add(ext)
+        else:
+            self.allowed_extensions = set(supported_extensions())
+
+    def run(self) -> list[FileResult]:
+        results = []
+
+        if self.root_path.is_file():
+            files = [self.root_path]
+        else:
+            files = sorted(self._discover_files())
+
+        if not files:
+            logger.info("처리할 파일이 없습니다.")
+            return results
+
+        logger.info("발견된 파일: %d개", len(files))
+
+        for file_path in files:
+            result = self._process_file(file_path)
+            if result:
+                results.append(result)
+
+        return results
+
+    def _discover_files(self):
+        for ext in self.allowed_extensions:
+            pattern = f"*{ext}"
+            yield from self.root_path.rglob(pattern)
+
+    def _process_file(self, file_path: Path) -> FileResult | None:
+        ext = file_path.suffix.lower()
+        parser = get_parser(ext)
+        if not parser:
+            return None
+
+        # 파일 읽기
+        try:
+            source = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            logger.warning("비UTF-8 파일 스킵: %s", file_path)
+            return None
+
+        # 함수 추출
+        functions = parser.extract_functions(str(file_path), source)
+        if not functions:
+            return None
+
+        # 출력 경로 계산
+        if self.root_path.is_file():
+            rel_path = file_path.name
+        else:
+            rel_path = file_path.relative_to(self.root_path)
+        dest_path = self.output_dir / rel_path
+
+        result = FileResult(
+            source_path=str(file_path),
+            dest_path=str(dest_path),
+            functions_found=len(functions),
+        )
+
+        # 처리 대상 필터링
+        targets = self._filter_targets(functions)
+
+        if not targets:
+            result.functions_skipped = len(functions)
+            if self.dry_run:
+                self._print_dry_run(file_path, functions, targets)
+            return result
+
+        if self.dry_run:
+            self._print_dry_run(file_path, functions, targets)
+            return result
+
+        # LLM 호출 + 주석 생성
+        show_progress = len(source.splitlines()) > VERY_LARGE_FILE_THRESHOLD
+        comment_results = self._generate_comments(targets, parser, file_path, show_progress)
+
+        result.functions_commented = len(comment_results)
+        result.functions_skipped = len(functions) - len(comment_results)
+
+        if not comment_results:
+            return result
+
+        # 주석 삽입
+        original_lines = source.splitlines(keepends=True)
+        # 마지막 줄에 개행이 없으면 추가
+        if original_lines and not original_lines[-1].endswith("\n"):
+            original_lines[-1] += "\n"
+
+        new_lines = insert_comments(original_lines, comment_results)
+
+        # 결과 파일 저장
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_text("".join(new_lines), encoding="utf-8")
+        logger.info("저장: %s (%d개 함수)", dest_path, len(comment_results))
+
+        return result
+
+    def _filter_targets(self, functions: list[FunctionInfo]) -> list[FunctionInfo]:
+        targets = []
+        for func in functions:
+            # 선언 전용 → --include-declarations 필요
+            if func.is_declaration_only and not self.include_declarations:
+                continue
+            # 기존 주석 → --overwrite 필요
+            if func.has_existing_docstring and not self.overwrite:
+                continue
+            targets.append(func)
+        return targets
+
+    def _generate_comments(
+        self,
+        targets: list[FunctionInfo],
+        parser,
+        file_path: Path,
+        show_progress: bool,
+    ) -> list[CommentResult]:
+        comment_results = []
+        total = len(targets)
+
+        def process_one(func: FunctionInfo) -> CommentResult | None:
+            sys_prompt = get_system_prompt(func)
+            user_prompt = build_user_prompt(func)
+            raw = self.llm.generate_comment(sys_prompt, user_prompt)
+            if not raw:
+                return None
+            parsed = parse_llm_response(raw)
+            if not parsed:
+                return None
+
+            comment_lines = parser.format_comment(parsed, func.body_indent)
+
+            # 삽입 위치 결정
+            if func.is_declaration_only:
+                insert_lineno = func.lineno  # 함수 선언 앞
+            elif func.body_start_lineno:
+                insert_lineno = func.body_start_lineno
+            else:
+                return None
+
+            # 기존 docstring 교체 범위
+            replace_end = None
+            if func.has_existing_docstring and self.overwrite and func.body_start_lineno:
+                replace_end = self._find_docstring_end(file_path, func)
+
+            return CommentResult(
+                function_name=func.name,
+                comment_lines=comment_lines,
+                insert_lineno=insert_lineno,
+                replace_end_lineno=replace_end,
+            )
+
+        if self.workers <= 1 or total <= 1:
+            for i, func in enumerate(targets):
+                if show_progress:
+                    self._show_progress(file_path.name, i + 1, total)
+                result = process_one(func)
+                if result:
+                    comment_results.append(result)
+        else:
+            with ThreadPoolExecutor(max_workers=self.workers) as executor:
+                futures = {executor.submit(process_one, func): func for func in targets}
+                done_count = 0
+                for future in as_completed(futures):
+                    done_count += 1
+                    if show_progress:
+                        self._show_progress(file_path.name, done_count, total)
+                    try:
+                        result = future.result()
+                        if result:
+                            comment_results.append(result)
+                    except Exception as e:
+                        func = futures[future]
+                        logger.error("함수 '%s' 처리 실패: %s", func.name, e)
+
+        return comment_results
+
+    def _find_docstring_end(self, file_path: Path, func: FunctionInfo) -> int | None:
+        """기존 docstring의 끝 라인을 찾는다 (Python 전용)."""
+        if func.language != "python" or not func.body_start_lineno:
+            return None
+
+        try:
+            source = file_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+        lines = source.splitlines()
+        start_idx = func.body_start_lineno - 1
+
+        if start_idx >= len(lines):
+            return None
+
+        first_line = lines[start_idx].strip()
+
+        # triple-quote 시작 확인
+        for quote in ('"""', "'''"):
+            if quote in first_line:
+                # 같은 줄에서 닫히는 경우
+                rest = first_line.split(quote, 1)[1]
+                if quote in rest:
+                    return func.body_start_lineno
+
+                # 여러 줄 docstring
+                for i in range(start_idx + 1, min(start_idx + 200, len(lines))):
+                    if quote in lines[i]:
+                        return i + 1  # 1-based
+                break
+
+        return None
+
+    def _show_progress(self, filename: str, current: int, total: int):
+        pct = int(current / total * 100)
+        sys.stderr.write(f"\r  [{filename}] {current}/{total} 함수 ({pct}%)")
+        if current == total:
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    def _print_dry_run(self, file_path: Path, functions: list[FunctionInfo], targets: list[FunctionInfo]):
+        print(f"\n📄 {file_path}")
+        for func in functions:
+            is_target = func in targets
+            marker = "→" if is_target else "  (skip)"
+            kind = "method" if func.is_method else "function"
+            decl = " [declaration]" if func.is_declaration_only else ""
+            doc = " [has docstring]" if func.has_existing_docstring else ""
+            cls = f"{func.class_name}." if func.class_name else ""
+            print(f"  {marker} {kind} {cls}{func.name} (L{func.lineno}-{func.end_lineno}){decl}{doc}")
